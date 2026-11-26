@@ -1,50 +1,64 @@
 #!/usr/bin/env python3
-"""Entry builder for the One Star, Five Stars for the Food bounty.
+"""One Star, Five Stars for the Food — entry builder.
 
-Reads entry.txt (the alien tourist's one-star review of Earth), normalizes
-it to one line, validates the gate rules (1..200 chars, not blank) and
-copies it to $MAKEFUN_OUTPUT_DIR/entry.txt.
+An alien tourist files a one-star review of Earth and still praises the
+food. This script squeezes repo entry.txt into that single line, checks it
+against the sealed gate (UTF-8, 1..CAP chars, non-blank), then drops the
+verdict text where the sandbox expects it.
 """
 import json
 import os
+import sys
+from pathlib import Path
 
-MAX_CHARS = int(os.environ.get("ENTRY_MAX_CHARS", "200"))  # this bounty's gate
-
-
-def normalize(source_text):
-    """One line only: strip trailing newlines and stray CR, keep first non-blank."""
-    text = source_text.replace("\r", "").rstrip("\n")
-    if "\n" in text:
-        text = next(ln for ln in text.split("\n") if ln.strip())
-    return text
+CAP = int(os.environ.get("ENTRY_CAP", "200"))  # gate ceiling for this bounty
+ARTIFACT = "entry.txt"
 
 
-def run():
-    here = os.path.dirname(os.path.abspath(__file__))
-    src = os.path.join(here, "entry.txt")
-    try:
-        with open(src, "rb") as fh:
-            blob = fh.read()
-    except FileNotFoundError:
-        print(json.dumps({"ok": False, "error": "missing entry.txt"}))
-        return 1
-    text = normalize(blob.decode("utf-8"))
-    if not (1 <= len(text) <= MAX_CHARS):
-        print(json.dumps({"ok": False, "error": f"entry must be 1-{MAX_CHARS} chars",
-                          "got": len(text)}))
-        return 1
-    if not text.strip():
-        print(json.dumps({"ok": False, "error": "entry must not be blank"}))
-        return 1
-    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
-    os.makedirs(out_dir, exist_ok=True)
-    with open(os.path.join(out_dir, "entry.txt"), "w", encoding="utf-8",
-              newline="\n") as fh:
-        fh.write(text)
-    print(json.dumps({"ok": True, "chars": len(text), "max": MAX_CHARS,
-                      "preview": text[:60]}))
+def squeeze(raw_bytes):
+    """Collapse the review to one physical line; CR and blank leads go."""
+    body = raw_bytes.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    for cand in body.split("\n"):
+        if cand.strip():
+            return cand
+    return ""
+
+
+def verdict(review):
+    """Return (ok, reason) for the gate: length window and non-blank."""
+    if not review:
+        return False, "review came back empty after squeezing"
+    if len(review) > CAP:
+        return False, f"review spans {len(review)} chars, gate ceiling is {CAP}"
+    return True, f"{len(review)} chars inside the 1..{CAP} window"
+
+
+def emit(review, receipt):
+    """Hand the artifact to the sandbox dir, defaulting to /output."""
+    target = Path(os.environ.get("MAKEFUN_OUTPUT_DIR") or "/output")
+    target.mkdir(parents=True, exist_ok=True)
+    (target / ARTIFACT).write_text(review + "\n", encoding="utf-8",
+                                   newline="\n")
+    print(json.dumps(receipt))
     return 0
 
 
+def main():
+    home = Path(__file__).resolve().parent
+    source = home / ARTIFACT
+    if not source.is_file():
+        print(json.dumps({"ok": False, "why": f"{ARTIFACT} not found beside main.py"}))
+        return 1
+    review = squeeze(source.read_bytes())
+    good, why = verdict(review)
+    if not good:
+        print(json.dumps({"ok": False, "why": why}))
+        return 1
+    assert "star" in review.lower(), "review must mention its star verdict"
+    sentences = len([s for s in review.replace("!.", ".").split(". ") if s.strip()])
+    return emit(review, {"ok": True, "why": why, "cap": CAP,
+                         "sentences": sentences, "head": review[:48]})
+
+
 if __name__ == "__main__":
-    raise SystemExit(run())
+    sys.exit(main())
